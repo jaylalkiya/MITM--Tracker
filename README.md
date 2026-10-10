@@ -2,6 +2,8 @@
 
 Detect and undo man-in-the-middle attacks on your network — a Windows defence console with a phosphor-green terminal UI.
 
+[![Download MITM-Tracker.exe](https://img.shields.io/github/v/release/jaylalkiya/MITM--Tracker?label=Download%20.exe&style=for-the-badge)](https://github.com/jaylalkiya/MITM--Tracker/releases/latest)
+
 ![MITM Tracker console](screenshots/watchdog.png)
 
 ## What it does
@@ -18,13 +20,15 @@ Everything it changes (ARP pins, firewall blocks, DHCP leases) can be undone wit
 
 ## Quick start
 
+[Download the latest `MITM-Tracker.exe`](https://github.com/jaylalkiya/MITM--Tracker/releases/latest) — no installer, no Python needed. Then:
+
 ```
 MITM-Tracker.exe                 # opens the console
 MITM-Tracker.exe --init          # once: trust the current network
 MITM-Tracker.exe --protect       # full protection until Ctrl+C
 ```
 
-No Python needed for the `.exe`. Needs Administrator to pin the gateway, block an attacker, or take an address back — detection alone works without it.
+Needs Administrator to pin the gateway, block an attacker, or take an address back — detection alone works without it.
 
 Running from source instead: `python mitm_tracker.py` (needs Python 3; `pip install scapy` + [Npcap](https://npcap.com) to un-poison other hosts on the LAN, not just this one).
 

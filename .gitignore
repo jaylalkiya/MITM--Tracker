@@ -5,13 +5,16 @@ router_watch.log
 router_watch.log.1
 notify_webhook.txt
 
-# Build artifacts
+# Build artifacts - the .exe ships as a GitHub Release asset instead,
+# not a tracked file, so clones stay small and history doesn't grow by
+# ~20MB every time it's rebuilt.
 __pycache__/
 *.pyc
 build_tmp/
 build/
 dist/
 *.spec
+MITM-Tracker.exe
 
 # Local tool config, not part of the project
 .claude/
