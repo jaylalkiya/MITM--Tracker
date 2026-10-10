@@ -38,6 +38,10 @@ Running from source instead: `python mitm_tracker.py` (needs Python 3; `pip inst
 - **NETWORK FINGERPRINT** — baseline vs. live, one row per marker; `[ !! ]` means that row changed
 - Three tabs: **WATCHDOG** (fingerprint + arm/scan), **DEVICES** (everyone on your network), **DEFENDER** (countermeasures + block list)
 
+| WATCHDOG | DEVICES | DEFENDER |
+|---|---|---|
+| ![WATCHDOG tab](screenshots/watchdog.png) | ![DEVICES tab](screenshots/devices.png) | ![DEFENDER tab](screenshots/defender.png) |
+
 Full command reference, troubleshooting, and the phone-notification setup are in [`README.txt`](README.txt).
 
 ## Every command
