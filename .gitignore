@@ -1,0 +1,17 @@
+# Regenerated at runtime - contains this machine's real network identity
+# (SSID, MAC addresses, public IP). Never commit these.
+router_baseline.json
+router_watch.log
+router_watch.log.1
+notify_webhook.txt
+
+# Build artifacts
+__pycache__/
+*.pyc
+build_tmp/
+build/
+dist/
+*.spec
+
+# Local tool config, not part of the project
+.claude/
