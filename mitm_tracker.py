@@ -2227,7 +2227,7 @@ CYAN   = "#39ff6a"    # headings, accents (bright green, kept as CYAN name
 AMBER  = "#ffcc00"    # warning / degraded
 RED    = "#ff3b3b"    # bad / intrusion
 TEXT   = "#8fff9f"    # normal text
-DIM    = "#2f6b3a"    # muted text
+DIM    = "#4f9a5e"    # muted text - still has to be readable on PANEL
 
 MONO   = "Courier New"
 
@@ -2280,12 +2280,18 @@ class App:
         # Fit the screen we are actually on: a fixed 900px tall window gets
         # clamped on a 768/864px laptop display, which silently crushes the
         # console pane down to a couple of lines.
-        want_h = min(880, max(620, root.winfo_screenheight() - 120))
-        want_w = min(1000, max(970, root.winfo_screenwidth() - 120))
+        # Sizes below are at 100% display scaling; fonts follow Windows scaling
+        # on their own, so the window has to grow with them.
+        self.ui_scale = max(1.0, root.winfo_fpixels("1i") / 96)
+        s = self.ui_scale
+        want_h = min(int(880 * s),
+                     max(int(620 * s), root.winfo_screenheight() - int(120 * s)))
+        want_w = min(int(1000 * s),
+                     max(int(970 * s), root.winfo_screenwidth() - int(120 * s)))
         root.geometry(f"{want_w}x{want_h}")
         # 970 is what the widest row (fingerprint + verdict column) actually
         # needs; below that the right-hand controls fall off the edge.
-        root.minsize(970, 560)
+        root.minsize(int(970 * s), int(560 * s))
         root.configure(bg=DEEP)
 
         icon = resource_path(ICON_NAME)
@@ -2317,8 +2323,10 @@ class App:
     # ------------------------------------------------------- small widgets
     def _blink_cursor(self):
         """Toggle the block cursor beside the title, like a live terminal prompt."""
-        shown = self.title_cursor.cget("text") == "█"
-        self.title_cursor.config(text="" if shown else "█")
+        # Blink the colour, not the text: an empty label has no width, which
+        # made everything to the right of the cursor jump on every blink.
+        shown = self.title_cursor.cget("fg") == GREEN
+        self.title_cursor.config(fg=DEEP if shown else GREEN)
         self.root.after(530, self._blink_cursor)
 
     def _btn(self, parent, text, command, kind="ghost", width=None):
@@ -2340,7 +2348,8 @@ class App:
                       relief="flat", bd=0, padx=14, pady=7,
                       cursor="hand2", highlightthickness=1,
                       highlightbackground=EDGE, highlightcolor=EDGE,
-                      disabledforeground=DIM)
+                      # DIM vanishes on the red of a disabled STOP.
+                      disabledforeground="#6e0f0f" if kind == "danger" else DIM)
         if width:
             b.config(width=width)
         b.bind("<Enter>", lambda e: b["state"] == "normal" and b.config(bg=hover))
@@ -2414,7 +2423,7 @@ class App:
 
         if not admin:
             tk.Label(self.root, bg=DEEP, fg=AMBER, font=(MONO, 8),
-                     anchor="w", justify="left", wraplength=940,
+                     anchor="w", justify="left", wraplength=int(940 * self.ui_scale),
                      text="! running without Administrator - it can DETECT and "
                           "warn, but it cannot pin the gateway, block anyone, "
                           "or take an address back. Close this and reopen it, "
@@ -2458,9 +2467,29 @@ class App:
 
         body = tk.Frame(self.root, bg=DEEP)
         self.body = body
-        self._build_watch_tab(body)
-        self._build_devices_tab(body)
-        self._build_defender_tab(body)
+        # The tabs live in a canvas so that a tab taller than the window can
+        # scroll. Without this, whatever did not fit was simply unreachable:
+        # on a laptop screen that was SET BASELINE, SCAN ONCE and MANUAL SCAN.
+        self.tab_canvas = tk.Canvas(body, bg=DEEP, highlightthickness=0, bd=0,
+                                    height=1, yscrollincrement=24)
+        self.tab_scroll = tk.Scrollbar(body, command=self.tab_canvas.yview,
+                                       bg=PANEL2, troughcolor=TERM,
+                                       activebackground=CYAN, bd=0,
+                                       highlightthickness=0, width=12)
+        self.tab_canvas.config(yscrollcommand=self.tab_scroll.set)
+        self.tab_canvas.pack(side="left", fill="both", expand=True)
+        self.tab_host = tk.Frame(self.tab_canvas, bg=DEEP)
+        host_id = self.tab_canvas.create_window(0, 0, window=self.tab_host,
+                                                anchor="nw")
+        self.tab_canvas.bind(
+            "<Configure>",
+            lambda e: self.tab_canvas.itemconfigure(host_id, width=e.width))
+        self.tab_host.bind("<Configure>", lambda e: self._fit_tabs())
+        self.root.bind("<Configure>", lambda e: self._fit_tabs(), add="+")
+        self.root.bind_all("<MouseWheel>", self._on_tab_wheel, add="+")
+        self._build_watch_tab(self.tab_host)
+        self._build_devices_tab(self.tab_host)
+        self._build_defender_tab(self.tab_host)
 
         # ---------- console log ----------
         # Packed to the BOTTOM before the tab area, so it always keeps its
@@ -2487,7 +2516,7 @@ class App:
 
         holder = tk.Frame(loginner, bg=TERM)
         holder.pack(fill="both", expand=True)
-        self.logbox = tk.Text(holder, height=7, wrap="word", bd=0,
+        self.logbox = tk.Text(holder, height=4, wrap="word", bd=0,
                               padx=10, pady=8, bg=TERM, fg=TEXT,
                               font=(MONO, 9), insertbackground=GREEN,
                               selectbackground=GREENQ,
@@ -2521,6 +2550,34 @@ class App:
             self.tabbtns[n].config(fg=DIM, bg=DEEP)
         self.tabs[name].pack(fill="both", expand=True, pady=(9, 0))
         self.tabbtns[name].config(fg=GREEN, bg=PANEL)
+        self.tab_canvas.yview_moveto(0)
+        self.root.after_idle(self._fit_tabs)
+
+    def _fit_tabs(self):
+        """Give the open tab all the height it needs, up to what the console
+        can spare, and offer a scrollbar only if it still does not fit."""
+        canvas = self.tab_canvas
+        want = self.tab_host.winfo_reqheight()
+        s = self.ui_scale
+        room = (self.root.winfo_height() - self.body.winfo_y() - int(125 * s))
+        height = max(int(120 * s), min(want, room))
+        if int(canvas.cget("height")) != height:
+            canvas.config(height=height)
+        canvas.config(scrollregion=(0, 0, 0, want))
+        if want > height:
+            if not self.tab_scroll.winfo_manager():
+                self.tab_scroll.pack(side="right", fill="y", before=canvas)
+        elif self.tab_scroll.winfo_manager():
+            self.tab_scroll.pack_forget()
+            canvas.yview_moveto(0)
+
+    def _on_tab_wheel(self, event):
+        """Wheel scrolls the tab, except over a box with its own scrolling."""
+        w = event.widget
+        if isinstance(w, str) or w.winfo_class() in ("Text", "Listbox"):
+            return
+        if str(w).startswith(str(self.tab_canvas))                 and self.tab_scroll.winfo_manager():
+            self.tab_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     def _tick_clock(self):
         try:
@@ -2671,7 +2728,7 @@ class App:
         self.devbox.tag_config("plain", foreground=TEXT)
 
         tk.Label(card, bg=PANEL, fg=DIM, font=(MONO, 8), justify="left",
-                 anchor="w", wraplength=900,
+                 anchor="w", wraplength=int(900 * self.ui_scale),
                  text="SCAN NETWORK pings every address on your subnet so the "
                       "ARP table fills up - without it you only see hosts this "
                       "PC happened to talk to. DUPLICATE means one machine is "
@@ -3344,6 +3401,17 @@ class App:
         self._run_bg(lambda: list_blocks(), done, exclusive=False)
 
 
+def _enable_dpi_awareness():
+    """Draw at the display's real resolution. Otherwise Windows renders the
+    window at 100% and stretches the bitmap, which blurs all text at 125%+."""
+    if not IS_WIN:
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)   # system DPI aware
+    except Exception:
+        pass   # purely cosmetic; never a reason not to open
+
+
 def run_gui():
     """Open the defence console."""
     try:
@@ -3354,6 +3422,7 @@ def run_gui():
               "    " + CMD + " --status")
         return 1
 
+    _enable_dpi_awareness()
     root = tk.Tk()
     app = App(root)
 
