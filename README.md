@@ -60,6 +60,15 @@ Full command reference, troubleshooting, and the phone-notification setup are in
 --help                 everything, grouped
 ```
 
+## Privacy
+
+MITM Tracker has no telemetry. Your baseline and log stay in local files next to the program. It only makes these outbound web requests:
+
+- **Public IP lookup:** asks `checkip.amazonaws.com`, `api.ipify.org` or `ifconfig.me`, so those services see your IP. Untick "include WAN IP lookup" in the console to turn this off.
+- **Webhook alerts (off by default):** if you set up a webhook, each alert sends its title, message, your computer name and the time to that URL. Use a private channel, and a hard-to-guess topic name on `ntfy`.
+
+`router_baseline.json` and `router_watch.log` contain your network's real identity (SSID, MAC addresses, public IP), so don't share them or include them in screenshots.
+
 ## Safety
 
 Only use this on a network you own or are authorised to defend. It sends ARP packets, ping-sweeps the subnet, and edits the Windows Firewall — the same behaviours an attack tool would have, which is also why antivirus tools sometimes flag the packaged `.exe`. Run `python mitm_tracker.py` instead if you'd rather avoid that.
