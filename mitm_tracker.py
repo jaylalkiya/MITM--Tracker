@@ -832,6 +832,18 @@ WHY = {
 }
 
 
+def _why(key, baseline, current, changed):
+    """Explain a "net" change, given what else changed alongside it."""
+    if key == "bssid" and "ssid" in changed:
+        return ("Different access point hardware, as expected: the Wi-Fi "
+                "network itself changed.")
+    if key == "gateway_ip" and baseline.get("subnet")             and baseline["subnet"] == current.get("subnet"):
+        return ("The gateway moved to another address in the same subnet. A "
+                "router reconfiguration can do that, and so can a rogue DHCP "
+                "server handing out its own address.")
+    return WHY.get(key, "You are no longer on the trusted network.")
+
+
 def compare(baseline, current):
     """Return a list of (key, label, old, new, kind) for changed fields."""
     changes = []
@@ -1922,33 +1934,41 @@ def _report_capabilities():
 
 
 def _respond(baseline, current, spoofed, hijacked, left_net, state,
-             do_defend, do_restore, strict):
-    """Do something about what we found, according to what it actually is."""
+             do_defend, do_restore, strict, repeat=False):
+    """Do something about what we found, according to what it actually is.
+
+    On a `repeat` cycle the responses still run, but the advice and headers
+    have already been said once, so they are not said again.
+    """
+    def say(message):
+        if not repeat:
+            log(message)
+
     # A hijack is both a MAC change and an address change, so it must be
     # decided first - and it has one owner, not two, or the address would be
     # reclaimed twice per cycle.
     if hijacked:
         if do_defend:
-            log("Active defense enabled - taking the network back:")
+            say("Active defense enabled - taking the network back:")
             _defend_bounded(baseline, current, state)
         elif do_restore:
-            log("Auto-restore enabled - taking the address back:")
+            say("Auto-restore enabled - taking the address back:")
             _restore_bounded(baseline, current, state, strict=strict)
         else:
-            log("     To take the network back:  " + CMD + " --protect")
+            say("     To take the network back:  " + CMD + " --protect")
         return
 
     if do_defend and spoofed:
-        log("Active defense enabled - responding to the spoofing:")
+        say("Active defense enabled - responding to the spoofing:")
         _defend_bounded(baseline, current, state)
     elif spoofed:
-        log("     To respond to this:  " + CMD + " --protect")
+        say("     To respond to this:  " + CMD + " --protect")
 
     if do_restore and left_net:
-        log("Auto-restore enabled - returning to the trusted network:")
+        say("Auto-restore enabled - returning to the trusted network:")
         _restore_bounded(baseline, current, state, strict=strict)
     elif left_net:
-        log("     To go back to your normal network:  " + CMD + " --restore")
+        say("     To go back to your normal network:  " + CMD + " --restore")
 
 
 def check(check_public=True, state=None, do_defend=False, do_restore=False,
@@ -2031,8 +2051,13 @@ def check(check_public=True, state=None, do_defend=False, do_restore=False,
         # Keep responding, up to the try limits: the trusted network may simply
         # have been out of range, or the attacker may still be pushing.
         _respond(baseline, current, spoofed, hijacked, left_net, state,
-                 do_defend, do_restore, strict)
+                 do_defend, do_restore, strict, repeat=True)
         return 1
+
+    changed = {key for key, *_ in changes}
+    # Only "Expected" if you really did join something else. On the same Wi-Fi
+    # name, a new router is a hijack or an evil twin, not a reason to relax.
+    joined_other = bool(changed & {"ssid", "interface"})
 
     for position, (key, label, old, new, kind) in enumerate(changes):
         alert(f"{label} CHANGED:  {old}  ->  {new}", beep=position == 0)
@@ -2041,11 +2066,15 @@ def check(check_public=True, state=None, do_defend=False, do_restore=False,
                 "This is what ARP spoofing or a rogue router looks like. "
                 "Investigate before sending anything sensitive over this "
                 "connection.")
-        elif kind == "arp":
+        elif kind == "arp" and joined_other:
             log("     ^ Expected: the gateway address changed too, so this is "
                 "simply a different router answering - not ARP spoofing.")
+        elif kind == "arp":
+            log("     ^ The gateway address changed too, so this is not ARP "
+                "spoofing - but a different machine is acting as your router "
+                "on what should be the same network. See below.")
         elif kind == "net":
-            log("     ^ " + WHY.get(key, "You are no longer on the trusted network."))
+            log("     ^ " + _why(key, baseline, current, changed))
 
     if hijacked:
         log("     ^^ You are still on the SAME Wi-Fi and the SAME access point, "
@@ -3389,6 +3418,10 @@ def print_status():
     print("-" * 74)
     if not base:
         print("  No baseline yet. Run:  " + CMD + " --init")
+    elif drift == ["My address"]:
+        # Not a watched marker: DHCP handing you a new address is routine.
+        print("  You are on the trusted network. Only your own address "
+              "changed, which is normal when a DHCP lease renews.")
     elif drift:
         same_gw = base.get("gateway_ip") == cur.get("gateway_ip")
         if same_gw and base.get("gateway_mac") and cur.get("gateway_mac") \
