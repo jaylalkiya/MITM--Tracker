@@ -284,7 +284,7 @@ def scapy_problem():
 
 
 def mac_dashed(mac):
-    """netsh wants 06-b4-d9-d1-e8-1e; we store colons everywhere else."""
+    """netsh wants aa-bb-cc-dd-ee-ff; we store colons everywhere else."""
     return mac.lower().replace(":", "-") if mac else mac
 
 
@@ -2581,7 +2581,7 @@ class App:
         tk.Label(left, text="ARM DEFENCE", bg=PANEL, fg=GREEN,
                  font=(MONO, 12, "bold"), anchor="w").pack(anchor="w")
         tk.Label(left, text="scan every 15s  >  pin the real gateway  >  "
-                            "counter-attack  >  repair the link",
+                            "active defence  >  repair the link",
                  bg=PANEL, fg=DIM, font=(MONO, 8), anchor="w").pack(anchor="w",
                                                                     pady=(3, 0))
         self.protect_btn = self._btn(inner, "  ENGAGE  ", self.protect_now,
@@ -2619,7 +2619,7 @@ class App:
         l2 = tk.Frame(watch, bg=PANEL)
         l2.pack(fill="x", padx=12, pady=(0, 8))
         self.defend_var = tk.BooleanVar(value=False)
-        self._check(l2, "counter-attack", self.defend_var).pack(side="left")
+        self._check(l2, "active defence", self.defend_var).pack(side="left")
         self.restore_var = tk.BooleanVar(value=False)
         self._check(l2, "auto-reconnect", self.restore_var).pack(side="left",
                                                                  padx=12)
@@ -3282,7 +3282,7 @@ class App:
 
     @staticmethod
     def _armed_note(interval, do_defend, do_restore, do_harden):
-        on = [n for n, v in (("counter-attack", do_defend),
+        on = [n for n, v in (("active defence", do_defend),
                              ("auto-reconnect", do_restore),
                              ("gateway pinned", do_harden)) if v]
         return (f"every {interval}s   |   "
