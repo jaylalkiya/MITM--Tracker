@@ -204,5 +204,118 @@ class Status(unittest.TestCase):
         self.assertIn("You are on the trusted network", self.status_output({}))
 
 
+    def test_hijack_is_not_called_another_network(self):
+        out = self.status_output(HIJACK_NEW_SUBNET)
+        self.assertNotIn("you are on another network", out)
+        self.assertIn("answering DHCP", out)
+
+    def test_other_wifi_is_still_called_another_network(self):
+        self.assertIn("you are on another network",
+                      self.status_output(OTHER_WIFI))
+
+
+ARP_OUTPUT = """
+Interface: 192.168.1.5 --- 0x5
+  Internet Address      Physical Address      Type
+  192.168.1.10          aa-aa-aa-aa-aa-10     dynamic
+  192.168.1.20          aa-aa-aa-aa-aa-20     dynamic
+  192.168.1.255         ff-ff-ff-ff-ff-ff     static
+  224.0.0.22            01-00-5e-00-00-16     static
+"""
+
+
+class Patched(unittest.TestCase):
+    def patch(self, **fakes):
+        for name, fake in fakes.items():
+            patcher = mock.patch.object(m, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+
+class GatewayMac(Patched):
+    def test_a_longer_address_is_not_mistaken_for_the_gateway(self):
+        # 192.168.1.1 is absent; 192.168.1.10 merely starts with it.
+        self.patch(_run=lambda *a, **k: (0, "", ""),
+                   _out=lambda *a, **k: ARP_OUTPUT)
+        self.assertIsNone(m.get_gateway_mac("192.168.1.1"))
+        self.assertEqual(m.get_gateway_mac("192.168.1.10"), "aa:aa:aa:aa:aa:10")
+
+
+class Toast(Patched):
+    def test_ssid_cannot_break_out_of_the_powershell_string(self):
+        scripts = []
+        self.patch(IS_WIN=True,
+                   _run=lambda cmd, **k: scripts.append(cmd[-1]) or (0, "", ""))
+        m._toast("t", "SSID CHANGED:  Home  ->  ');calc;('")
+        self.assertIn("'');calc;(''", scripts[0])
+        # Every apostrophe inside the literal is doubled, so it never closes.
+        literal = scripts[0].split("LoadXml(", 1)[1].split("); $n", 1)[0]
+        self.assertNotIn("'", literal[1:-1].replace("''", ""))
+
+
+class Firewall(Patched):
+    def test_block_refuses_anything_but_one_ipv4_address(self):
+        ran = []
+        self.patch(IS_WIN=True, is_admin=lambda: True, log=lambda *a, **k: None,
+                   _run=lambda cmd, **k: ran.append(cmd) or (0, "", ""))
+        for bad in ("any", "0.0.0.0/0", "10.0.0.1-10.0.0.9", "LocalSubnet", ""):
+            self.assertFalse(m.block_ip(bad))
+        self.assertEqual(ran, [])
+        self.assertTrue(m.block_ip("10.0.0.9"))
+
+    def test_list_blocks_reads_rule_names(self):
+        self.patch(IS_WIN=True, _ps=lambda script: (
+            "MITM-Tracker block 10.0.0.9\nMITM-Tracker block 10.0.0.9\n"
+            "MITM-Tracker block 10.0.0.7\n"))
+        self.assertEqual(m.list_blocks(), ["10.0.0.7", "10.0.0.9"])
+
+
+class Defend(Patched):
+    def setUp(self):
+        self.blocked, self.sent, self.restored = [], [], []
+        self.patch(
+            log=lambda *a, **k: None,
+            block_ip=lambda ip: self.blocked.append(ip),
+            pin_gateway=lambda *a, **k: True,
+            send_corrective_arp=lambda *a, **k: self.sent.append(a),
+            restore=lambda *a, **k: self.restored.append(1),
+            # The router also holds a second address on the same MAC.
+            arp_table=lambda: [("192.168.1.1", BASELINE["gateway_mac"]),
+                               ("192.168.1.254", BASELINE["gateway_mac"]),
+                               ("192.168.1.66", "cc:cc:cc:cc:cc:01")])
+
+    def test_clean_network_blocks_nobody(self):
+        m.defend(BASELINE, dict(BASELINE))
+        self.assertEqual((self.blocked, self.sent), ([], []))
+
+    def test_real_spoofing_still_blocks_the_attacker(self):
+        m.defend(BASELINE, dict(BASELINE, **ARP_SPOOF))
+        self.assertEqual(self.blocked, ["192.168.1.66"])
+        self.assertEqual(len(self.sent), 1)
+
+    def test_rogue_server_on_the_same_gateway_repairs_the_lease(self):
+        m.defend(BASELINE, dict(BASELINE, dhcp_server="192.168.1.66"))
+        self.assertEqual((self.blocked, self.sent, self.restored), ([], [], [1]))
+
+
+class CorrectiveArp(Patched):
+    def test_frames_keep_our_own_source_and_skip_non_hosts(self):
+        try:
+            import scapy.all as scapy
+        except Exception:
+            self.skipTest("scapy not installed")
+        frames = []
+        self.patch(have_scapy=lambda: True, log=lambda *a, **k: None,
+                   _out=lambda *a, **k: ARP_OUTPUT)
+        with mock.patch.object(scapy, "sendp",
+                               lambda pkts, **k: frames.extend(pkts)):
+            m.send_corrective_arp("192.168.1.1", "aa:aa:aa:aa:aa:01", rounds=1)
+        self.assertEqual(sorted(f[scapy.ARP].pdst for f in frames),
+                         ["192.168.1.1", "192.168.1.10", "192.168.1.20"])
+        for f in frames:
+            self.assertEqual(f[scapy.ARP].hwsrc, "aa:aa:aa:aa:aa:01")
+            self.assertIsNone(f[scapy.Ether].fields.get("src"))
+
+
 if __name__ == "__main__":
     unittest.main()
