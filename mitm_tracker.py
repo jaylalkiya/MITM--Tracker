@@ -396,7 +396,10 @@ def _toast(title, message):
         "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, "
         "ContentType=WindowsRuntime] | Out-Null; "
         "$x = New-Object Windows.Data.Xml.Dom.XmlDocument; "
-        f"$x.LoadXml('{xml}'); "
+        # _psq, not bare quotes: the message carries the SSID, which whoever
+        # runs the access point chooses. An apostrophe in it would end the
+        # string and run the rest of the name as PowerShell - elevated.
+        f"$x.LoadXml({_psq(xml)}); "
         "$n = [Windows.UI.Notifications.ToastNotification]::new($x); "
         "[Windows.UI.Notifications.ToastNotificationManager]::"
         "CreateToastNotifier('Microsoft.Windows.Powershell').Show($n)"
@@ -504,11 +507,12 @@ def get_gateway_mac(gateway_ip):
     _run(["ping", "-n" if IS_WIN else "-c", "1",
           "-w" if IS_WIN else "-W", "1000", gateway_ip], timeout=15)
 
-    for line in _out(["arp", "-a"]).splitlines():
-        if gateway_ip in line:
-            found = MAC_RE.search(line)
-            if found:
-                return found.group(0).lower().replace("-", ":")
+    # Whole-address match, via the same parser everything else uses. A
+    # substring test reads 192.168.0.10's row as the gateway 192.168.0.1
+    # whenever the gateway's own row is missing - a false spoofing alert.
+    for ip, mac in arp_table():
+        if ip == gateway_ip:
+            return mac
     return None
 
 
@@ -837,7 +841,8 @@ def _why(key, baseline, current, changed):
     if key == "bssid" and "ssid" in changed:
         return ("Different access point hardware, as expected: the Wi-Fi "
                 "network itself changed.")
-    if key == "gateway_ip" and baseline.get("subnet")             and baseline["subnet"] == current.get("subnet"):
+    if key == "gateway_ip" and baseline.get("subnet") \
+            and baseline["subnet"] == current.get("subnet"):
         return ("The gateway moved to another address in the same subnet. A "
                 "router reconfiguration can do that, and so can a rogue DHCP "
                 "server handing out its own address.")
@@ -1106,12 +1111,24 @@ def send_corrective_arp(gateway_ip, real_mac, rounds=5, interval=1.0):
 
     from scapy.all import ARP, Ether, sendp, conf
 
-    # Targeted victims = everyone we currently see, except the gateway itself.
-    victims = [ip for ip, _ in arp_table() if ip != gateway_ip]
+    # Targeted victims = every real host we currently see, except the gateway
+    # itself. Multicast and broadcast rows are not machines, and the router's
+    # other addresses do not need telling where the router is.
+    victims = {}
+    for ip, mac in arp_table():
+        if ip == gateway_ip or mac == real_mac.lower() or _NOT_A_HOST.match(mac):
+            continue
+        if 224 <= int(ip.split(".")[0]) <= 239:
+            continue
+        victims[ip] = mac
 
     def reply_to(dst_ip, dst_mac="ff:ff:ff:ff:ff:ff"):
         # op=2 is an ARP *reply*; psrc/hwsrc carry the correct mapping.
-        eth = Ether(src=real_mac, dst=dst_mac)
+        # The Ethernet source is left as OUR adapter on purpose. Stamping the
+        # router's MAC on frames leaving this port teaches every switch that
+        # the router lives here - which pulls the LAN's traffic to this PC,
+        # the very thing being undone - and Wi-Fi drops such frames anyway.
+        eth = Ether(dst=dst_mac)
         arp = ARP(op=2, psrc=gateway_ip, hwsrc=real_mac,
                   pdst=dst_ip, hwdst=dst_mac)
         return eth / arp
@@ -1119,7 +1136,7 @@ def send_corrective_arp(gateway_ip, real_mac, rounds=5, interval=1.0):
     try:
         for r in range(rounds):
             pkts = [reply_to(gateway_ip)]   # gratuitous broadcast for the gateway
-            pkts += [reply_to(ip) for ip in victims]
+            pkts += [reply_to(ip, mac) for ip, mac in victims.items()]
             sendp(pkts, iface=conf.iface, verbose=False)
             log(f"   [corrective ARP] round {r + 1}/{rounds}: announced "
                 f"{gateway_ip} is at {real_mac} to {len(victims) + 1} target(s)")
@@ -1304,7 +1321,18 @@ def block_ip(ip):
             "blocked. Re-run elevated to block the attacker.")
         return False
 
+    # One IPv4 address and nothing else: netsh also accepts 'any', ranges and
+    # keywords in remoteip=, and a typo there must not block the whole world.
+    addr = parse_ip(ip)
+    if addr is None or addr.version != 4:
+        log(f"   [block] '{ip}' is not an IPv4 address - nothing blocked.")
+        return False
+    ip = str(addr)
+
     name = f"{FIREWALL_TAG} {ip}"
+    # Drop any earlier copy first, so blocking the same attacker on every
+    # cycle does not pile up duplicate rules.
+    _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={name}"])
     ok = True
     for direction in ("in", "out"):
         rc, _, err = _run([
@@ -1337,8 +1365,11 @@ def list_blocks():
     """Names of the firewall rules this tool has created."""
     if not IS_WIN:
         return []
-    out = _out(["netsh", "advfirewall", "firewall", "show", "rule",
-                f"name={FIREWALL_TAG} all"])
+    # netsh matches name= exactly (only the bare word 'all' is special), so it
+    # cannot find "<tag> <ip>" rules by their prefix. Get-NetFirewallRule can.
+    out = _ps("Get-NetFirewallRule -DisplayName " + _psq(FIREWALL_TAG + " *")
+              + " -ErrorAction SilentlyContinue |"
+              " Select-Object -ExpandProperty DisplayName")
     return sorted(set(IPV4_RE.findall(out)))
 
 
@@ -1353,6 +1384,10 @@ def clear_all():
     for ip in list_blocks():
         if unblock_ip(ip):
             removed += 1
+    # A static address forced during a rogue-DHCP defence is ours to undo too.
+    forced = _forced_static()
+    if forced:
+        set_dhcp_ip(forced.get("alias"))
     log(f"   [clear] done. Removed {removed} firewall block(s).")
 
 
@@ -1534,6 +1569,29 @@ def restore_dns(alias, source, servers):
     return ok
 
 
+# Written when this tool forces a static address, so --clear knows there is
+# one to hand back - and never touches a static address you set yourself.
+FORCED_STATIC_FILE = os.path.join(BASE_DIR, "forced_static.json")
+
+
+def _forced_static():
+    """{'alias': ..., 'dns': bool} if a forced static address is in place."""
+    try:
+        with open(FORCED_STATIC_FILE, "r", encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) and data.get("alias") else None
+    except (OSError, ValueError):
+        return None
+
+
+def _note_forced_static(alias, dns=False):
+    try:
+        with open(FORCED_STATIC_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"alias": alias, "dns": bool(dns)}, fh)
+    except OSError:
+        pass
+
+
 def set_static_ip(alias, ip, prefix, gateway):
     """Nail the adapter to a fixed address/gateway, ignoring DHCP entirely.
 
@@ -1559,8 +1617,10 @@ def set_static_ip(alias, ip, prefix, gateway):
                         timeout=30)
     ok = rc == 0
     if ok:
+        _note_forced_static(alias)
         log(f"   [ip] address forced back to {ip}/{prefix} via {gateway} "
-            "(static - the rogue DHCP server can no longer move you).")
+            "(static - the rogue DHCP server can no longer move you). "
+            "Undo with:  " + CMD + " --dhcp")
     else:
         log(f"   [ip] could not set the static address ({(err or out).strip()[:160]}).")
     return ok
@@ -1577,6 +1637,16 @@ def set_dhcp_ip(alias):
                          f"name={alias}", "source=dhcp"], timeout=30)
     log("   [ip] address handed back to DHCP." if rc == 0
         else f"   [ip] could not switch back to DHCP ({(err or out).strip()[:160]}).")
+    if rc == 0:
+        forced = _forced_static()
+        if forced and forced.get("dns"):
+            # We made DNS static to go with the forced address; undo that too.
+            _run(["netsh", "interface", "ipv4", "set", "dnsservers",
+                  f"name={alias}", "source=dhcp"], timeout=30)
+        try:
+            os.remove(FORCED_STATIC_FILE)
+        except OSError:
+            pass
     return rc == 0
 
 
@@ -1603,6 +1673,12 @@ def reclaim_address(baseline, alias, tries=2):
         "back by force.")
     if not set_static_ip(alias, want_ip, prefix, want_gw):
         return False
+    # With DHCP off, the resolvers DHCP used to supply go with it. If that is
+    # where the trusted DNS came from, set it by hand or names stop resolving.
+    base_dns = baseline.get("dns_servers")
+    if base_dns and baseline.get("dns_source") == "dhcp":
+        if restore_dns(alias, "static", base_dns):
+            _note_forced_static(alias, dns=True)
     # A static address is only useful if the real gateway is actually reachable
     # from it; say so plainly rather than leaving a silently dead link.
     time.sleep(1)
@@ -1808,6 +1884,21 @@ def defend(baseline, current, do_correct=True, do_pin=True, do_block=True):
             f"{current['gateway_ip']}) and so did the Wi-Fi, so this is a "
             "different network, not spoofing. Not responding. Re-baseline "
             "here if it is trusted:  " + CMD + " --init")
+        return
+
+    # The gateway still answers from the trusted MAC, so nothing is spoofed.
+    # Carrying on would name the router's own MAC as "the attacker" and
+    # firewall off every other address the router holds.
+    if spoofed_mac and spoofed_mac.lower() == real_mac.lower():
+        if rogue_dhcp(baseline, current):
+            log(f"   [defend] gateway {gateway_ip} still answers from the "
+                "trusted MAC, but the lease came from a different DHCP "
+                "server. Repairing the lease and DNS instead of ARP.")
+            return restore(baseline, current)
+        log(f"   [defend] gateway {gateway_ip} is at the trusted {real_mac} - "
+            "no spoofing to respond to.")
+        if do_pin:
+            pin_gateway(gateway_ip, real_mac)
         return
 
     log(f"   [defend] responding: real gateway {gateway_ip} = {real_mac}, "
@@ -2576,7 +2667,8 @@ class App:
         w = event.widget
         if isinstance(w, str) or w.winfo_class() in ("Text", "Listbox"):
             return
-        if str(w).startswith(str(self.tab_canvas))                 and self.tab_scroll.winfo_manager():
+        if str(w).startswith(str(self.tab_canvas)) \
+                and self.tab_scroll.winfo_manager():
             self.tab_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     def _tick_clock(self):
@@ -3214,8 +3306,9 @@ class App:
         self._run_bg(lambda: restore(base), lambda _: self.refresh_status())
 
     def check_once(self):
-        pub = self.public_var.get()
-        self._run_bg(lambda: check(pub, do_defend=self.defend_var.get()),
+        # Both read here, on the UI thread - not from inside the worker.
+        pub, do_defend = self.public_var.get(), self.defend_var.get()
+        self._run_bg(lambda: check(pub, do_defend=do_defend),
                      lambda code: (self._set_banner(CODE_TO_STATE.get(code, "idle")),
                                    self.refresh_status()))
 
@@ -3280,6 +3373,12 @@ class App:
     def start_watch(self):
         from tkinter import messagebox
         if self.watch_thread and self.watch_thread.is_alive():
+            if self.watch_stop.is_set():
+                # STOP was pressed but the last check is still running; say
+                # so, rather than leaving a START button that does nothing.
+                self._append_raw("the previous scan is still finishing its "
+                                 "last check - press START again in a moment.",
+                                 "note")
             return
         try:
             interval = max(5, int(self.interval_var.get()))
@@ -3314,13 +3413,21 @@ class App:
         def loop():
             state = {}
             while not self.watch_stop.is_set():
-                code = check(pub, state, do_defend=do_defend,
-                             do_restore=do_restore, do_harden=do_harden)
-                st = "watching" if code == 0 else CODE_TO_STATE.get(code, "idle")
-                self.ui_q.put(lambda s=st: self._set_banner(
-                    s, self._armed_note(interval, do_defend, do_restore,
-                                        do_harden)))
-                self.ui_q.put(self.refresh_status)
+                try:
+                    code = check(pub, state, do_defend=do_defend,
+                                 do_restore=do_restore, do_harden=do_harden)
+                except Exception as exc:
+                    # One bad cycle must not end the watch: the thread would
+                    # die while the banner went on saying ARMED.
+                    log(f"Scan error ({exc}) - trying again next cycle.")
+                    code = None
+                if code is not None:
+                    st = ("watching" if code == 0
+                          else CODE_TO_STATE.get(code, "idle"))
+                    self.ui_q.put(lambda s=st: self._set_banner(
+                        s, self._armed_note(interval, do_defend, do_restore,
+                                            do_harden)))
+                    self.ui_q.put(self.refresh_status)
                 for _ in range(interval * 10):
                     if self.watch_stop.is_set():
                         break
@@ -3498,6 +3605,11 @@ def print_status():
             print("  *** MAC MISMATCH on the SAME gateway IP - this is the "
                   "ARP-spoofing signature.")
             print("      Respond with:  " + CMD + " --defend")
+        elif rogue_dhcp(base, cur):
+            print("  *** The addressing changed on the SAME Wi-Fi and access "
+                  "point - something here is answering DHCP in your router's "
+                  "place.")
+            print("      Respond with:  " + CMD + " --protect")
         elif not same_gw:
             print("  (different gateway IP - you are on another network, not "
                   "spoofing. Re-baseline here if it's trusted.)")
