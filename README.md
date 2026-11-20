@@ -4,7 +4,9 @@ Detect and undo man-in-the-middle attacks on your network — a Windows defence 
 
 [![Download MITM-Tracker.exe](https://img.shields.io/github/v/release/jaylalkiya/MITM--Tracker?label=Download%20.exe&style=for-the-badge)](https://github.com/jaylalkiya/MITM--Tracker/releases/latest)
 
-![MITM Tracker console](screenshots/watchdog.png)
+![MITM Tracker catching an ARP spoof: the gateway and the attacker are flagged as duplicates, and the console shows the alert, corrective ARP, gateway pin and firewall block](screenshots/demo-attack-caught.png)
+
+<sub>Demo run: a simulated ARP spoof on an invented network. Every message comes from the real code; no address shown is real.</sub>
 
 ## What it does
 
@@ -53,9 +55,11 @@ Running from source instead: `python mitm_tracker.py` (needs Python 3; `pip inst
 - **NETWORK FINGERPRINT** — baseline vs. live, one row per marker; `[ !! ]` means that row changed
 - Three tabs: **WATCHDOG** (fingerprint + arm/scan), **DEVICES** (everyone on your network), **DEFENDER** (countermeasures + block list)
 
-| WATCHDOG | DEVICES | DEFENDER |
-|---|---|---|
-| ![WATCHDOG tab](screenshots/watchdog.png) | ![DEVICES tab](screenshots/devices.png) | ![DEFENDER tab](screenshots/defender.png) |
+The same demo attack, tab by tab, and the calm state before it:
+
+| WATCHDOG: one marker changed | DEVICES: who did it | DEFENDER: attacker blocked | SECURE: all markers match |
+|---|---|---|---|
+| ![WATCHDOG tab in the INTRUSION state, gateway MAC row marked as changed](screenshots/demo-watchdog-intrusion.png) | ![DEVICES tab with the gateway and attacker flagged DUPLICATE](screenshots/demo-attack-caught.png) | ![DEFENDER tab with the attacker's address in the block list](screenshots/demo-defender-blocked.png) | ![WATCHDOG tab in the SECURE state, all six markers OK](screenshots/demo-secure.png) |
 
 Full command reference, troubleshooting, and the phone-notification setup are in [`README.txt`](README.txt).
 
