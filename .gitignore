@@ -4,6 +4,7 @@ router_baseline.json
 router_watch.log
 router_watch.log.1
 notify_webhook.txt
+forced_static.json
 
 # Build artifacts - the .exe ships as a GitHub Release asset instead,
 # not a tracked file, so clones stay small and history doesn't grow by
